@@ -35,13 +35,14 @@ def init_db():
     db = sqlite3.connect(DATABASE)
     cursor = db.cursor()
 
-    # Users Table
+    # Users Table (with role: explorer / admin)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             full_name TEXT NOT NULL,
             email TEXT UNIQUE NOT NULL,
             phone TEXT,
+            role TEXT NOT NULL DEFAULT 'explorer',
             password_hash TEXT NOT NULL,
             created_at TEXT NOT NULL
         )
@@ -59,8 +60,8 @@ def init_db():
             duration TEXT NOT NULL,
             elevation TEXT NOT NULL,
             price INTEGER NOT NULL,
-            rating REAL NOT NULL,
-            reviews_count INTEGER NOT NULL,
+            rating REAL NOT NULL DEFAULT 4.9,
+            reviews_count INTEGER NOT NULL DEFAULT 1,
             image_url TEXT NOT NULL,
             summary TEXT NOT NULL,
             highlights_json TEXT NOT NULL,
@@ -111,6 +112,21 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
+
+    # Seed Default Admin Account if missing
+    cursor.execute("SELECT id FROM users WHERE email = ?", ("admin@kabuttipis.id",))
+    if not cursor.fetchone():
+        cursor.execute(
+            "INSERT INTO users (full_name, email, phone, role, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "KTA Operations Admin",
+                "admin@kabuttipis.id",
+                "+62 812 8899 4410",
+                "admin",
+                generate_password_hash("admin123"),
+                datetime.utcnow().isoformat() + "Z",
+            ),
+        )
 
     # Seed Initial Destinations if empty
     cursor.execute("SELECT COUNT(*) FROM destinations")
@@ -283,9 +299,14 @@ def init_db():
 
 
 # ==============================================================================
-# HELPER UTILITIES
+# HELPER UTILITIES & AUTH DECORATORS
 # ==============================================================================
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def slugify(text):
+    clean = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower()).strip("-")
+    return f"{clean}-{uuid.uuid4().hex[:4]}"
 
 
 def serialize_destination(row):
@@ -308,11 +329,36 @@ def serialize_destination(row):
     }
 
 
-def login_required_api(f):
+def serialize_booking(r):
+    return {
+        "id": r["id"],
+        "booking_code": r["booking_code"],
+        "full_name": r["full_name"],
+        "email": r["email"],
+        "phone": r["phone"],
+        "destination_id": r["destination_id"],
+        "destination_title": r["destination_title"],
+        "package_tier": r["package_tier"],
+        "departure_date": r["departure_date"],
+        "guests": r["guests"],
+        "gear_addons": json.loads(r["gear_addons_json"]),
+        "notes": r["notes"],
+        "total_price": r["total_price"],
+        "status": r["status"],
+        "created_at": r["created_at"],
+    }
+
+
+def admin_required_api(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if "user_id" not in session:
-            return jsonify({"ok": False, "message": "Authentication required."}), 401
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({"ok": False, "message": "Admin sign-in required."}), 401
+        db = get_db()
+        user = db.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not user or user["role"] != "admin":
+            return jsonify({"ok": False, "message": "Administrator privileges required."}), 403
         return f(*args, **kwargs)
     return decorated
 
@@ -326,7 +372,7 @@ def index():
 
 
 # ==============================================================================
-# REST API ENDPOINTS
+# DESTINATIONS CRUD ENDPOINTS (CREATE, READ, UPDATE, DELETE)
 # ==============================================================================
 @app.route("/api/destinations", methods=["GET"])
 def api_get_destinations():
@@ -346,6 +392,7 @@ def api_get_destinations():
         like_term = f"%{search}%"
         params.extend([like_term, like_term, like_term])
 
+    query += " ORDER BY id ASC"
     rows = db.execute(query, params).fetchall()
     return jsonify({
         "ok": True,
@@ -353,6 +400,148 @@ def api_get_destinations():
     })
 
 
+@app.route("/api/destinations/<int:dest_id>", methods=["GET"])
+def api_get_destination_detail(dest_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM destinations WHERE id = ?", (dest_id,)).fetchone()
+    if not row:
+        return jsonify({"ok": False, "message": "Destination not found."}), 404
+    return jsonify({"ok": True, "destination": serialize_destination(row)})
+
+
+@app.route("/api/destinations", methods=["POST"])
+@admin_required_api
+def api_create_destination():
+    data = request.get_json(silent=True) or {}
+    title = str(data.get("title", "")).strip()
+    region = str(data.get("region", "")).strip()
+    category = str(data.get("category", "Alpine Summit")).strip()
+    difficulty = str(data.get("difficulty", "Moderate")).strip()
+    duration = str(data.get("duration", "3 Days / 2 Nights")).strip()
+    elevation = str(data.get("elevation", "2,500 MASL")).strip()
+    summary = str(data.get("summary", "")).strip()
+    image_url = str(data.get("image_url", "")).strip() or f"https://picsum.photos/seed/{uuid.uuid4().hex[:6]}/900/600"
+
+    try:
+        price = int(data.get("price", 0))
+    except (TypeError, ValueError):
+        price = 0
+
+    if len(title) < 3 or len(region) < 3 or price <= 0 or len(summary) < 10:
+        return jsonify({
+            "ok": False,
+            "message": "Please fill in Title, Region, valid Price (> 0), and Summary (min 10 chars)."
+        }), 400
+
+    highlights = data.get("highlights") or [
+        "Certified APGI / Marine expedition guide",
+        "Official national park permits & safety insurance",
+        "Full expedition camp & hot trail meals"
+    ]
+    itinerary = data.get("itinerary") or [
+        {"day": "Day 1", "title": "Basecamp Arrival & Acclimatization", "desc": "Gear inspection, safety briefing, and approach hike."},
+        {"day": "Day 2", "title": "Summit / Main Ridge Exploration", "desc": "Early morning push for panoramic sunrise views."},
+        {"day": "Day 3", "title": "Descent & Transfer Out", "desc": "Return to basecamp and private transfer."}
+    ]
+
+    db = get_db()
+    cursor = db.execute("""
+        INSERT INTO destinations (
+            slug, title, region, category, difficulty, duration, elevation,
+            price, rating, reviews_count, image_url, summary, highlights_json, itinerary_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 4.9, 1, ?, ?, ?, ?)
+    """, (
+        slugify(title),
+        title,
+        region,
+        category,
+        difficulty,
+        duration,
+        elevation,
+        price,
+        image_url,
+        summary,
+        json.dumps(highlights),
+        json.dumps(itinerary),
+    ))
+    db.commit()
+
+    created = db.execute("SELECT * FROM destinations WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    return jsonify({
+        "ok": True,
+        "message": f"Destination '{title}' created successfully!",
+        "destination": serialize_destination(created)
+    }), 201
+
+
+@app.route("/api/destinations/<int:dest_id>", methods=["PUT"])
+@admin_required_api
+def api_update_destination(dest_id):
+    db = get_db()
+    existing = db.execute("SELECT * FROM destinations WHERE id = ?", (dest_id,)).fetchone()
+    if not existing:
+        return jsonify({"ok": False, "message": "Destination not found."}), 404
+
+    data = request.get_json(silent=True) or {}
+    title = str(data.get("title", existing["title"])).strip()
+    region = str(data.get("region", existing["region"])).strip()
+    category = str(data.get("category", existing["category"])).strip()
+    difficulty = str(data.get("difficulty", existing["difficulty"])).strip()
+    duration = str(data.get("duration", existing["duration"])).strip()
+    elevation = str(data.get("elevation", existing["elevation"])).strip()
+    image_url = str(data.get("image_url", existing["image_url"])).strip()
+    summary = str(data.get("summary", existing["summary"])).strip()
+
+    try:
+        price = int(data.get("price", existing["price"]))
+    except (TypeError, ValueError):
+        price = existing["price"]
+
+    if len(title) < 3 or len(region) < 3 or price <= 0:
+        return jsonify({"ok": False, "message": "Title, Region, and positive Price are required."}), 400
+
+    highlights_json = json.dumps(data["highlights"]) if isinstance(data.get("highlights"), list) else existing["highlights_json"]
+    itinerary_json = json.dumps(data["itinerary"]) if isinstance(data.get("itinerary"), list) else existing["itinerary_json"]
+
+    db.execute("""
+        UPDATE destinations
+        SET title = ?, region = ?, category = ?, difficulty = ?, duration = ?,
+            elevation = ?, price = ?, image_url = ?, summary = ?,
+            highlights_json = ?, itinerary_json = ?
+        WHERE id = ?
+    """, (
+        title, region, category, difficulty, duration, elevation,
+        price, image_url, summary, highlights_json, itinerary_json, dest_id
+    ))
+    db.commit()
+
+    updated = db.execute("SELECT * FROM destinations WHERE id = ?", (dest_id,)).fetchone()
+    return jsonify({
+        "ok": True,
+        "message": f"Destination '{title}' updated!",
+        "destination": serialize_destination(updated)
+    })
+
+
+@app.route("/api/destinations/<int:dest_id>", methods=["DELETE"])
+@admin_required_api
+def api_delete_destination(dest_id):
+    db = get_db()
+    existing = db.execute("SELECT title FROM destinations WHERE id = ?", (dest_id,)).fetchone()
+    if not existing:
+        return jsonify({"ok": False, "message": "Destination not found."}), 404
+
+    db.execute("DELETE FROM destinations WHERE id = ?", (dest_id,))
+    db.commit()
+    return jsonify({
+        "ok": True,
+        "message": f"Destination '{existing['title']}' deleted."
+    })
+
+
+# ==============================================================================
+# BOOKINGS CRUD ENDPOINTS (CREATE, READ, UPDATE, DELETE)
+# ==============================================================================
 @app.route("/api/bookings", methods=["POST"])
 def api_create_booking():
     data = request.get_json(silent=True) or {}
@@ -429,6 +618,63 @@ def api_create_booking():
     }), 201
 
 
+@app.route("/api/bookings", methods=["GET"])
+@admin_required_api
+def api_admin_list_bookings():
+    db = get_db()
+    rows = db.execute("SELECT * FROM bookings ORDER BY id DESC").fetchall()
+    return jsonify({
+        "ok": True,
+        "bookings": [serialize_booking(r) for r in rows]
+    })
+
+
+@app.route("/api/bookings/<int:booking_id>", methods=["PUT"])
+@admin_required_api
+def api_update_booking(booking_id):
+    db = get_db()
+    existing = db.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+    if not existing:
+        return jsonify({"ok": False, "message": "Booking record not found."}), 404
+
+    data = request.get_json(silent=True) or {}
+    status = str(data.get("status", existing["status"])).strip()
+    departure_date = str(data.get("departure_date", existing["departure_date"])).strip()
+    package_tier = str(data.get("package_tier", existing["package_tier"])).strip()
+    guests = int(data.get("guests", existing["guests"]))
+    notes = str(data.get("notes", existing["notes"] or "")).strip()
+
+    db.execute("""
+        UPDATE bookings
+        SET status = ?, departure_date = ?, package_tier = ?, guests = ?, notes = ?
+        WHERE id = ?
+    """, (status, departure_date, package_tier, guests, notes, booking_id))
+    db.commit()
+
+    updated = db.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+    return jsonify({
+        "ok": True,
+        "message": f"Booking {updated['booking_code']} updated to '{status}'.",
+        "booking": serialize_booking(updated)
+    })
+
+
+@app.route("/api/bookings/<int:booking_id>", methods=["DELETE"])
+@admin_required_api
+def api_delete_booking(booking_id):
+    db = get_db()
+    existing = db.execute("SELECT booking_code FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+    if not existing:
+        return jsonify({"ok": False, "message": "Booking record not found."}), 404
+
+    db.execute("DELETE FROM bookings WHERE id = ?", (booking_id,))
+    db.commit()
+    return jsonify({
+        "ok": True,
+        "message": f"Booking {existing['booking_code']} deleted."
+    })
+
+
 @app.route("/api/bookings/lookup", methods=["GET"])
 def api_lookup_bookings():
     db = get_db()
@@ -449,25 +695,12 @@ def api_lookup_bookings():
     else:
         return jsonify({"ok": True, "bookings": []})
 
-    bookings = []
-    for r in rows:
-        bookings.append({
-            "booking_code": r["booking_code"],
-            "full_name": r["full_name"],
-            "email": r["email"],
-            "destination_title": r["destination_title"],
-            "package_tier": r["package_tier"],
-            "departure_date": r["departure_date"],
-            "guests": r["guests"],
-            "gear_addons": json.loads(r["gear_addons_json"]),
-            "total_price": r["total_price"],
-            "status": r["status"],
-            "created_at": r["created_at"]
-        })
-
-    return jsonify({"ok": True, "bookings": bookings})
+    return jsonify({"ok": True, "bookings": [serialize_booking(r) for r in rows]})
 
 
+# ==============================================================================
+# CONTACT & NEWSLETTER ENDPOINTS (+ ADMIN READ/DELETE)
+# ==============================================================================
 @app.route("/api/contact", methods=["POST"])
 def api_contact():
     data = request.get_json(silent=True) or {}
@@ -524,8 +757,35 @@ def api_newsletter():
     }), 201
 
 
+@app.route("/api/admin/inquiries", methods=["GET"])
+@admin_required_api
+def api_admin_inquiries():
+    db = get_db()
+    contacts = [dict(r) for r in db.execute("SELECT * FROM contacts ORDER BY id DESC").fetchall()]
+    subscribers = [dict(r) for r in db.execute("SELECT * FROM subscribers ORDER BY id DESC").fetchall()]
+    return jsonify({"ok": True, "contacts": contacts, "subscribers": subscribers})
+
+
+@app.route("/api/contacts/<int:contact_id>", methods=["DELETE"])
+@admin_required_api
+def api_delete_contact(contact_id):
+    db = get_db()
+    db.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
+    db.commit()
+    return jsonify({"ok": True, "message": "Contact inquiry removed."})
+
+
+@app.route("/api/subscribers/<int:sub_id>", methods=["DELETE"])
+@admin_required_api
+def api_delete_subscriber(sub_id):
+    db = get_db()
+    db.execute("DELETE FROM subscribers WHERE id = ?", (sub_id,))
+    db.commit()
+    return jsonify({"ok": True, "message": "Subscriber removed."})
+
+
 # ==============================================================================
-# AUTHENTICATION ENDPOINTS (SIGN UP / SIGN IN / SESSION)
+# AUTHENTICATION ENDPOINTS (SIGN UP / SIGN IN / DEMO ADMIN / SESSION)
 # ==============================================================================
 @app.route("/api/auth/register", methods=["POST"])
 def api_register():
@@ -548,7 +808,7 @@ def api_register():
 
     pw_hash = generate_password_hash(password)
     cursor = db.execute(
-        "INSERT INTO users (full_name, email, phone, password_hash, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO users (full_name, email, phone, role, password_hash, created_at) VALUES (?, ?, ?, 'explorer', ?, ?)",
         (full_name, email, phone, pw_hash, datetime.utcnow().isoformat() + "Z")
     )
     db.commit()
@@ -559,7 +819,7 @@ def api_register():
     return jsonify({
         "ok": True,
         "message": "Explorer account created successfully!",
-        "user": {"id": user_id, "full_name": full_name, "email": email, "phone": phone}
+        "user": {"id": user_id, "full_name": full_name, "email": email, "phone": phone, "role": "explorer"}
     }), 201
 
 
@@ -582,7 +842,28 @@ def api_login():
             "id": user["id"],
             "full_name": user["full_name"],
             "email": user["email"],
-            "phone": user["phone"]
+            "phone": user["phone"],
+            "role": user["role"]
+        }
+    })
+
+
+@app.route("/api/auth/demo-admin", methods=["POST"])
+def api_demo_admin_login():
+    db = get_db()
+    admin = db.execute("SELECT * FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1").fetchone()
+    if not admin:
+        return jsonify({"ok": False, "message": "Admin account not initialized."}), 500
+    session["user_id"] = admin["id"]
+    return jsonify({
+        "ok": True,
+        "message": "Signed in as KTA Operations Admin.",
+        "user": {
+            "id": admin["id"],
+            "full_name": admin["full_name"],
+            "email": admin["email"],
+            "phone": admin["phone"],
+            "role": admin["role"]
         }
     })
 
@@ -600,7 +881,7 @@ def api_me():
         return jsonify({"ok": True, "user": None})
 
     db = get_db()
-    user = db.execute("SELECT id, full_name, email, phone FROM users WHERE id = ?", (user_id,)).fetchone()
+    user = db.execute("SELECT id, full_name, email, phone, role FROM users WHERE id = ?", (user_id,)).fetchone()
     if not user:
         session.pop("user_id", None)
         return jsonify({"ok": True, "user": None})
@@ -611,7 +892,8 @@ def api_me():
             "id": user["id"],
             "full_name": user["full_name"],
             "email": user["email"],
-            "phone": user["phone"]
+            "phone": user["phone"],
+            "role": user["role"]
         }
     })
 

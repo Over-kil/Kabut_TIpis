@@ -225,9 +225,18 @@ button, input, select, textarea {
   background: var(--ocean-primary);
   color: #FFFFFF;
 }
+.btn-danger {
+  background: rgba(217, 4, 41, 0.12);
+  border-color: rgba(217, 4, 41, 0.35);
+  color: #d90429;
+}
+.btn-danger:hover {
+  background: #d90429;
+  color: #FFFFFF;
+}
 .btn-sm {
-  padding: 8px 16px;
-  font-size: 0.84rem;
+  padding: 7px 14px;
+  font-size: 0.82rem;
 }
 
 /* ==========================================================================
@@ -289,15 +298,15 @@ button, input, select, textarea {
 .nav-links {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   list-style: none;
 }
 .nav-link-btn {
   background: transparent;
   border: none;
-  padding: 8px 13px;
+  padding: 8px 12px;
   border-radius: var(--radius-pill);
-  font-size: 0.88rem;
+  font-size: 0.86rem;
   font-weight: 600;
   color: var(--text-secondary);
   cursor: pointer;
@@ -315,7 +324,7 @@ button, input, select, textarea {
 .nav-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 .icon-toggle-btn {
   width: 38px;
@@ -351,7 +360,7 @@ button, input, select, textarea {
   display: flex;
 }
 
-@media (max-width: 1024px) {
+@media (max-width: 1120px) {
   .nav-links {
     display: none;
   }
@@ -850,7 +859,7 @@ button, input, select, textarea {
 }
 
 /* ==========================================================================
-   FORMS (BOOKING, AUTH, CONTACT, NEWSLETTER)
+   FORMS & ADMIN CRUD DATA TABLES
    ========================================================================== */
 .two-col-grid {
   display: grid;
@@ -885,12 +894,12 @@ button, input, select, textarea {
 }
 .form-control {
   width: 100%;
-  padding: 11px 14px;
+  padding: 10px 14px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--glass-border);
   background: var(--bg-page);
   color: var(--text-primary);
-  font-size: 0.92rem;
+  font-size: 0.9rem;
   transition: border-color 0.2s ease;
 }
 .form-control:focus {
@@ -914,6 +923,52 @@ button, input, select, textarea {
   background: rgba(217, 4, 41, 0.12);
   border: 1px solid #d90429;
   color: #d90429;
+}
+
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+}
+.crud-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+.crud-table th,
+.crud-table td {
+  padding: 12px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--glass-border);
+  vertical-align: middle;
+}
+.crud-table th {
+  font-weight: 800;
+  color: var(--dark-blue);
+  background: rgba(0, 119, 182, 0.06);
+  white-space: nowrap;
+}
+[data-theme="dark"] .crud-table th {
+  color: var(--ocean-light);
+}
+.crud-table tr:hover td {
+  background: rgba(0, 119, 182, 0.04);
+}
+.status-pill {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 0.75rem;
+  font-weight: 700;
+  background: rgba(0, 119, 182, 0.14);
+  color: var(--ocean-primary);
+}
+.status-pill.cancelled {
+  background: rgba(217, 4, 41, 0.14);
+  color: #d90429;
+}
+.status-pill.completed {
+  background: rgba(16, 185, 129, 0.15);
+  color: #059669;
 }
 
 /* ==========================================================================

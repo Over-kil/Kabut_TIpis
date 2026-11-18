@@ -58,6 +58,20 @@ const TIMELINE_STEPS = [
   { phase: "Stage 04 · Summit & Horizon", title: "Golden Dawn Push & Safe Return", desc: "Reach the summit ridge or coral lagoon at optimal light, followed by recovery transfers and digital expedition logbooks." }
 ];
 
+const EMPTY_DEST_FORM = {
+  id: null,
+  title: "",
+  region: "",
+  category: "Alpine Summit",
+  difficulty: "Moderate",
+  duration: "3 Days / 2 Nights",
+  elevation: "2,800 MASL",
+  price: 2500000,
+  image_url: "https://picsum.photos/seed/ktacustom/900/600",
+  summary: "",
+  highlightsText: "Certified APGI / Marine expedition guide\nOfficial national park permits & insurance\nFull expedition camp & hot trail meals"
+};
+
 const formatIDR = (amount) =>
   new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(amount);
 
@@ -136,6 +150,15 @@ function App() {
   const [myBookings, setMyBookings] = useState([]);
   const [lookupCode, setLookupCode] = useState("");
 
+  // Admin CRUD States
+  const [adminTab, setAdminTab] = useState("destinations");
+  const [destForm, setDestForm] = useState(EMPTY_DEST_FORM);
+  const [adminBookings, setAdminBookings] = useState([]);
+  const [adminContacts, setAdminContacts] = useState([]);
+  const [adminSubscribers, setAdminSubscribers] = useState([]);
+  const [editingBooking, setEditingBooking] = useState(null);
+  const [crudAlert, setCrudAlert] = useState(null);
+
   // Booking State
   const [bookingForm, setBookingForm] = useState({
     full_name: "",
@@ -165,21 +188,46 @@ function App() {
 
   // Preloader Dismissal
   useEffect(() => {
-    const timer = setTimeout(() => setLoading(false), 650);
+    const timer = setTimeout(() => setLoading(false), 600);
     return () => clearTimeout(timer);
   }, []);
 
-  // Load Initial Data from Python Flask API
-  useEffect(() => {
+  const loadDestinations = () => {
     fetch("/api/destinations")
       .then((res) => res.json())
       .then((data) => {
-        if (data.ok && data.destinations.length > 0) {
+        if (data.ok) {
           setDestinations(data.destinations);
-          setBookingForm((prev) => ({ ...prev, destination_id: data.destinations[0].id }));
+          if (data.destinations.length > 0) {
+            setBookingForm((prev) => ({
+              ...prev,
+              destination_id: prev.destination_id || data.destinations[0].id
+            }));
+          }
         }
       })
       .catch(() => {});
+  };
+
+  const loadAdminData = async () => {
+    try {
+      const [bkRes, inqRes] = await Promise.all([
+        fetch("/api/bookings"),
+        fetch("/api/admin/inquiries")
+      ]);
+      const bkData = await bkRes.json();
+      const inqData = await inqRes.json();
+      if (bkData.ok) setAdminBookings(bkData.bookings);
+      if (inqData.ok) {
+        setAdminContacts(inqData.contacts);
+        setAdminSubscribers(inqData.subscribers);
+      }
+    } catch {}
+  };
+
+  // Load Initial Data from Python Flask API
+  useEffect(() => {
+    loadDestinations();
 
     fetch("/api/auth/me")
       .then((res) => res.json())
@@ -193,12 +241,15 @@ function App() {
             phone: data.user.phone || ""
           }));
           fetchUserBookings();
+          if (data.user.role === "admin") {
+            loadAdminData();
+          }
         }
       })
       .catch(() => {});
   }, []);
 
-  // Scroll Listener (Parallax + Back to Top + Reveal)
+  // Scroll Listener (Parallax + Back to Top)
   useEffect(() => {
     const handleScroll = () => {
       const y = window.scrollY;
@@ -256,6 +307,10 @@ function App() {
     if (destId) {
       setBookingForm((prev) => ({ ...prev, destination_id: destId }));
     }
+    if (page === "admin" && currentUser?.role === "admin") {
+      loadDestinations();
+      loadAdminData();
+    }
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -308,6 +363,7 @@ function App() {
       }
       setBookingResult(data.booking);
       fetchUserBookings(data.booking.booking_code);
+      if (currentUser?.role === "admin") loadAdminData();
     } catch {
       setBookingError("Network error while connecting to KTA booking server.");
     }
@@ -337,8 +393,25 @@ function App() {
         phone: data.user.phone || ""
       }));
       fetchUserBookings();
+      if (data.user.role === "admin") loadAdminData();
     } catch {
       setAuthStatus({ ok: false, message: "Server connection error." });
+    }
+  };
+
+  const handleDemoAdminLogin = async () => {
+    setCrudAlert(null);
+    try {
+      const res = await fetch("/api/auth/demo-admin", { method: "POST" });
+      const data = await res.json();
+      if (data.ok) {
+        setCurrentUser(data.user);
+        setCrudAlert({ ok: true, message: data.message });
+        loadDestinations();
+        loadAdminData();
+      }
+    } catch {
+      setCrudAlert({ ok: false, message: "Unable to sign in as Admin." });
     }
   };
 
@@ -346,7 +419,135 @@ function App() {
     await fetch("/api/auth/logout", { method: "POST" });
     setCurrentUser(null);
     setMyBookings([]);
+    setAdminBookings([]);
     setAuthStatus({ ok: true, message: "You have been signed out." });
+  };
+
+  /* ==========================================================================
+     ADMIN CRUD HANDLERS (DESTINATIONS, BOOKINGS, INQUIRIES)
+     ========================================================================== */
+  const handleSaveDestination = async (e) => {
+    e.preventDefault();
+    setCrudAlert(null);
+    const isEdit = Boolean(destForm.id);
+    const url = isEdit ? `/api/destinations/${destForm.id}` : "/api/destinations";
+    const method = isEdit ? "PUT" : "POST";
+
+    const payload = {
+      title: destForm.title,
+      region: destForm.region,
+      category: destForm.category,
+      difficulty: destForm.difficulty,
+      duration: destForm.duration,
+      elevation: destForm.elevation,
+      price: Number(destForm.price),
+      image_url: destForm.image_url,
+      summary: destForm.summary,
+      highlights: destForm.highlightsText.split("\n").map((s) => s.trim()).filter(Boolean)
+    };
+
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setCrudAlert({ ok: false, message: data.message || "Failed to save destination." });
+        return;
+      }
+      setCrudAlert({ ok: true, message: data.message });
+      setDestForm(EMPTY_DEST_FORM);
+      loadDestinations();
+    } catch {
+      setCrudAlert({ ok: false, message: "Network error saving destination." });
+    }
+  };
+
+  const handleEditDestinationClick = (dest) => {
+    setDestForm({
+      id: dest.id,
+      title: dest.title,
+      region: dest.region,
+      category: dest.category,
+      difficulty: dest.difficulty,
+      duration: dest.duration,
+      elevation: dest.elevation,
+      price: dest.price,
+      image_url: dest.image_url,
+      summary: dest.summary,
+      highlightsText: (dest.highlights || []).join("\n")
+    });
+    window.scrollTo({ top: 140, behavior: "smooth" });
+  };
+
+  const handleDeleteDestination = async (dest) => {
+    if (!window.confirm(`Hapus destinasi "${dest.title}" secara permanen?`)) return;
+    setCrudAlert(null);
+    try {
+      const res = await fetch(`/api/destinations/${dest.id}`, { method: "DELETE" });
+      const data = await res.json();
+      setCrudAlert({ ok: res.ok && data.ok, message: data.message });
+      if (res.ok && data.ok) {
+        if (destForm.id === dest.id) setDestForm(EMPTY_DEST_FORM);
+        loadDestinations();
+      }
+    } catch {
+      setCrudAlert({ ok: false, message: "Error deleting destination." });
+    }
+  };
+
+  const handleUpdateBooking = async (e) => {
+    e.preventDefault();
+    if (!editingBooking) return;
+    setCrudAlert(null);
+    try {
+      const res = await fetch(`/api/bookings/${editingBooking.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: editingBooking.status,
+          departure_date: editingBooking.departure_date,
+          package_tier: editingBooking.package_tier,
+          guests: Number(editingBooking.guests),
+          notes: editingBooking.notes
+        })
+      });
+      const data = await res.json();
+      setCrudAlert({ ok: res.ok && data.ok, message: data.message });
+      if (res.ok && data.ok) {
+        setEditingBooking(null);
+        loadAdminData();
+      }
+    } catch {
+      setCrudAlert({ ok: false, message: "Failed to update booking." });
+    }
+  };
+
+  const handleDeleteBooking = async (bk) => {
+    if (!window.confirm(`Hapus data booking ${bk.booking_code} (${bk.full_name})?`)) return;
+    setCrudAlert(null);
+    try {
+      const res = await fetch(`/api/bookings/${bk.id}`, { method: "DELETE" });
+      const data = await res.json();
+      setCrudAlert({ ok: res.ok && data.ok, message: data.message });
+      if (res.ok && data.ok) loadAdminData();
+    } catch {
+      setCrudAlert({ ok: false, message: "Failed to delete booking." });
+    }
+  };
+
+  const handleDeleteInquiry = async (type, id) => {
+    const endpoint = type === "contact" ? `/api/contacts/${id}` : `/api/subscribers/${id}`;
+    try {
+      const res = await fetch(endpoint, { method: "DELETE" });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setCrudAlert({ ok: true, message: data.message });
+        loadAdminData();
+      }
+    } catch {}
   };
 
   const handleContactSubmit = async (e) => {
@@ -401,7 +602,8 @@ function App() {
     { id: "gallery", label: "Gallery" },
     { id: "packages", label: "Packages" },
     { id: "booking", label: "Booking" },
-    { id: "contact", label: "Contact" }
+    { id: "contact", label: "Contact" },
+    { id: "admin", label: "Admin CRUD" }
   ];
 
   return (
@@ -441,6 +643,7 @@ function App() {
                     className={`nav-link-btn ${activePage === item.id ? "active" : ""}`}
                     onClick={() => navigateTo(item.id)}
                   >
+                    {item.id === "admin" && <i className="fa-solid fa-database" style={{ marginRight: "5px" }}></i>}
                     {item.label}
                   </button>
                 </li>
@@ -540,8 +743,8 @@ function App() {
                     <div className="stat-label">Safe Summit &amp; Sea Finishers</div>
                   </div>
                   <div className="glass-card stat-card">
-                    <div className="stat-number"><AnimatedCounter target={28} /></div>
-                    <div className="stat-label">Curated Archipelago Routes</div>
+                    <div className="stat-number"><AnimatedCounter target={destinations.length || 6} /></div>
+                    <div className="stat-label">Active Curated Expeditions</div>
                   </div>
                   <div className="glass-card stat-card">
                     <div className="stat-number"><AnimatedCounter target={100} suffix="%" /></div>
@@ -1102,7 +1305,7 @@ function App() {
               <div className="two-col-grid">
                 {!currentUser ? (
                   <form className="glass-card form-card" onSubmit={handleAuthSubmit}>
-                    <div style={{ display: "flex", gap: "10px", marginBottom: "18px" }}>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "10px", marginBottom: "18px" }}>
                       <button
                         type="button"
                         className={`btn btn-sm ${authMode === "login" ? "btn-primary" : "btn-outline"}`}
@@ -1116,6 +1319,13 @@ function App() {
                         onClick={() => { setAuthMode("register"); setAuthStatus(null); }}
                       >
                         Sign Up
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        onClick={handleDemoAdminLogin}
+                      >
+                        <i className="fa-solid fa-user-shield"></i> Demo Admin
                       </button>
                     </div>
 
@@ -1183,11 +1393,19 @@ function App() {
                     <h3>Account Profile</h3>
                     <p style={{ margin: "10px 0", color: "var(--text-secondary)" }}>
                       <strong>Email:</strong> {currentUser.email}<br />
-                      <strong>Phone:</strong> {currentUser.phone || "Not set"}
+                      <strong>Phone:</strong> {currentUser.phone || "Not set"}<br />
+                      <strong>Role:</strong> {currentUser.role.toUpperCase()}
                     </p>
-                    <button className="btn btn-outline btn-sm" onClick={handleLogout}>
-                      <i className="fa-solid fa-right-from-bracket"></i> Sign Out
-                    </button>
+                    <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+                      {currentUser.role === "admin" && (
+                        <button className="btn btn-primary btn-sm" onClick={() => navigateTo("admin")}>
+                          <i className="fa-solid fa-database"></i> Open Admin CRUD
+                        </button>
+                      )}
+                      <button className="btn btn-outline btn-sm" onClick={handleLogout}>
+                        <i className="fa-solid fa-right-from-bracket"></i> Sign Out
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -1217,7 +1435,7 @@ function App() {
                         <div key={b.booking_code} className="glass-card" style={{ padding: "14px" }}>
                           <div style={{ display: "flex", justifyContent: "space-between" }}>
                             <strong style={{ color: "var(--ocean-primary)" }}>{b.booking_code}</strong>
-                            <span style={{ fontSize: "0.78rem", fontWeight: 700 }}>{b.status}</span>
+                            <span className="status-pill">{b.status}</span>
                           </div>
                           <div style={{ fontWeight: 700, margin: "4px 0" }}>{b.destination_title}</div>
                           <div style={{ fontSize: "0.82rem", color: "var(--text-secondary)" }}>
@@ -1234,7 +1452,7 @@ function App() {
         )}
 
         {/* ================================================================
-            PAGE 8: CONTACT & GOOGLE MAPS INTEGRATION
+            PAGE 8: CONTACT & MAPS INTEGRATION
            ================================================================ */}
         {activePage === "contact" && (
           <section className="section page-top-spacer">
@@ -1320,6 +1538,451 @@ function App() {
                   </div>
                 </div>
               </div>
+            </div>
+          </section>
+        )}
+
+        {/* ================================================================
+            PAGE 9: ADMIN CRUD MANAGEMENT CONSOLE
+           ================================================================ */}
+        {activePage === "admin" && (
+          <section className="section page-top-spacer">
+            <div className="container">
+              <div className="section-header">
+                <span className="section-tag">Database Operations</span>
+                <h2 className="section-title">KTA Admin CRUD Control Center</h2>
+                <p className="section-desc">
+                  Create, Read, Update, and Delete expedition destinations, customer bookings, and inbox dispatches directly in SQLite.
+                </p>
+              </div>
+
+              {crudAlert && (
+                <div className={`alert-banner ${crudAlert.ok ? "alert-success" : "alert-error"}`}>
+                  {crudAlert.message}
+                </div>
+              )}
+
+              {currentUser?.role !== "admin" ? (
+                <div className="glass-card form-card" style={{ maxWidth: "560px", margin: "0 auto", textAlign: "center" }}>
+                  <i className="fa-solid fa-user-shield" style={{ fontSize: "2.2rem", color: "var(--ocean-primary)", marginBottom: "12px" }}></i>
+                  <h3>Administrator Authentication Required</h3>
+                  <p style={{ color: "var(--text-secondary)", fontSize: "0.92rem", margin: "10px 0 18px" }}>
+                    Sign in with <strong>admin@kabuttipis.id</strong> (password: <code>admin123</code>) or use 1-Click Demo Admin access below to manage database records.
+                  </p>
+                  <div style={{ display: "flex", gap: "10px", justifyContent: "center", flexWrap: "wrap" }}>
+                    <button className="btn btn-primary" onClick={handleDemoAdminLogin}>
+                      <i className="fa-solid fa-bolt"></i> 1-Click Demo Admin Login
+                    </button>
+                    <button className="btn btn-outline" onClick={() => navigateTo("auth")}>
+                      Manual Sign In
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {/* CRUD SUB-TABS */}
+                  <div className="filter-bar">
+                    <button
+                      className={`filter-pill ${adminTab === "destinations" ? "active" : ""}`}
+                      onClick={() => setAdminTab("destinations")}
+                    >
+                      <i className="fa-solid fa-mountain"></i> Destinations CRUD ({destinations.length})
+                    </button>
+                    <button
+                      className={`filter-pill ${adminTab === "bookings" ? "active" : ""}`}
+                      onClick={() => { setAdminTab("bookings"); loadAdminData(); }}
+                    >
+                      <i className="fa-solid fa-calendar-check"></i> Bookings CRUD ({adminBookings.length})
+                    </button>
+                    <button
+                      className={`filter-pill ${adminTab === "inquiries" ? "active" : ""}`}
+                      onClick={() => { setAdminTab("inquiries"); loadAdminData(); }}
+                    >
+                      <i className="fa-solid fa-envelope-open-text"></i> Messages &amp; Subscribers ({adminContacts.length + adminSubscribers.length})
+                    </button>
+                  </div>
+
+                  {/* TAB 1: DESTINATIONS CRUD (CREATE, READ, UPDATE, DELETE) */}
+                  {adminTab === "destinations" && (
+                    <div className="two-col-grid">
+                      <form className="glass-card form-card" onSubmit={handleSaveDestination}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                          <h3 style={{ color: "var(--dark-blue)" }}>
+                            {destForm.id ? `Edit Destination #${destForm.id}` : "Create New Destination"}
+                          </h3>
+                          {destForm.id && (
+                            <button type="button" className="btn btn-outline btn-sm" onClick={() => setDestForm(EMPTY_DEST_FORM)}>
+                              + New Mode
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="form-group">
+                          <label>Expedition Title *</label>
+                          <input
+                            type="text"
+                            className="form-control"
+                            required
+                            value={destForm.title}
+                            onChange={(e) => setDestForm({ ...destForm, title: e.target.value })}
+                            placeholder="e.g., Mount Prau Golden Sunrise Camp"
+                          />
+                        </div>
+
+                        <div className="form-row">
+                          <div className="form-group">
+                            <label>Region / Province *</label>
+                            <input
+                              type="text"
+                              className="form-control"
+                              required
+                              value={destForm.region}
+                              onChange={(e) => setDestForm({ ...destForm, region: e.target.value })}
+                              placeholder="Dieng Plateau, Central Java"
+                            />
+                          </div>
+                          <div className="form-group">
+                            <label>Category</label>
+                            <select
+                              className="form-control"
+                              value={destForm.category}
+                              onChange={(e) => setDestForm({ ...destForm, category: e.target.value })}
+                            >
+                              <option value="Alpine Summit">Alpine Summit</option>
+                              <option value="Marine & Island">Marine &amp; Island</option>
+                              <option value="Volcanic Overland">Volcanic Overland</option>
+                              <option value="Cultural & Overland">Cultural &amp; Overland</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        <div className="form-row">
+                          <div className="form-group">
+                            <label>Difficulty</label>
+                            <select
+                              className="form-control"
+                              value={destForm.difficulty}
+                              onChange={(e) => setDestForm({ ...destForm, difficulty: e.target.value })}
+                            >
+                              <option value="Easy">Easy</option>
+                              <option value="Easy-Moderate">Easy-Moderate</option>
+                              <option value="Moderate">Moderate</option>
+                              <option value="Challenging">Challenging</option>
+                            </select>
+                          </div>
+                          <div className="form-group">
+                            <label>Duration</label>
+                            <input
+                              type="text"
+                              className="form-control"
+                              value={destForm.duration}
+                              onChange={(e) => setDestForm({ ...destForm, duration: e.target.value })}
+                            />
+                          </div>
+                        </div>
+
+                        <div className="form-row">
+                          <div className="form-group">
+                            <label>Elevation / Depth</label>
+                            <input
+                              type="text"
+                              className="form-control"
+                              value={destForm.elevation}
+                              onChange={(e) => setDestForm({ ...destForm, elevation: e.target.value })}
+                            />
+                          </div>
+                          <div className="form-group">
+                            <label>Price per Guest (IDR) *</label>
+                            <input
+                              type="number"
+                              min="100000"
+                              step="50000"
+                              className="form-control"
+                              required
+                              value={destForm.price}
+                              onChange={(e) => setDestForm({ ...destForm, price: e.target.value })}
+                            />
+                          </div>
+                        </div>
+
+                        <div className="form-group">
+                          <label>Cover Image URL</label>
+                          <input
+                            type="url"
+                            className="form-control"
+                            value={destForm.image_url}
+                            onChange={(e) => setDestForm({ ...destForm, image_url: e.target.value })}
+                          />
+                        </div>
+
+                        <div className="form-group">
+                          <label>Summary Description *</label>
+                          <textarea
+                            rows="3"
+                            className="form-control"
+                            required
+                            value={destForm.summary}
+                            onChange={(e) => setDestForm({ ...destForm, summary: e.target.value })}
+                            placeholder="Describe the route, scenery, and expedition experience..."
+                          ></textarea>
+                        </div>
+
+                        <div className="form-group">
+                          <label>Highlights (one per line)</label>
+                          <textarea
+                            rows="3"
+                            className="form-control"
+                            value={destForm.highlightsText}
+                            onChange={(e) => setDestForm({ ...destForm, highlightsText: e.target.value })}
+                          ></textarea>
+                        </div>
+
+                        <button type="submit" className="btn btn-primary" style={{ width: "100%" }}>
+                          <i className="fa-solid fa-floppy-disk"></i> {destForm.id ? "Update Destination" : "Create Destination"}
+                        </button>
+                      </form>
+
+                      {/* READ & DELETE DESTINATIONS TABLE */}
+                      <div className="glass-card form-card">
+                        <h3 style={{ marginBottom: "14px" }}>All Destinations ({destinations.length})</h3>
+                        <div className="table-responsive">
+                          <table className="crud-table">
+                            <thead>
+                              <tr>
+                                <th>Expedition</th>
+                                <th>Category</th>
+                                <th>Price</th>
+                                <th>Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {destinations.map((d) => (
+                                <tr key={d.id}>
+                                  <td>
+                                    <strong>{d.title}</strong>
+                                    <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>{d.region} · {d.duration}</div>
+                                  </td>
+                                  <td>{d.category}</td>
+                                  <td style={{ whiteSpace: "nowrap", fontWeight: 700, color: "var(--ocean-primary)" }}>
+                                    {formatIDR(d.price)}
+                                  </td>
+                                  <td style={{ whiteSpace: "nowrap" }}>
+                                    <div style={{ display: "flex", gap: "6px" }}>
+                                      <button
+                                        type="button"
+                                        className="btn btn-outline btn-sm"
+                                        onClick={() => handleEditDestinationClick(d)}
+                                        title="Edit"
+                                      >
+                                        <i className="fa-solid fa-pen"></i>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="btn btn-danger btn-sm"
+                                        onClick={() => handleDeleteDestination(d)}
+                                        title="Delete"
+                                      >
+                                        <i className="fa-solid fa-trash"></i>
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* TAB 2: BOOKINGS CRUD (READ, UPDATE, DELETE) */}
+                  {adminTab === "bookings" && (
+                    <div className="glass-card form-card">
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px", flexWrap: "wrap", gap: "10px" }}>
+                        <h3>All Expedition Bookings ({adminBookings.length})</h3>
+                        <button className="btn btn-primary btn-sm" onClick={() => navigateTo("booking")}>
+                          + New Booking
+                        </button>
+                      </div>
+
+                      {editingBooking && (
+                        <form onSubmit={handleUpdateBooking} className="glass-card" style={{ padding: "16px", marginBottom: "18px" }}>
+                          <strong style={{ display: "block", marginBottom: "10px", color: "var(--ocean-primary)" }}>
+                            Editing Booking {editingBooking.booking_code} — {editingBooking.full_name}
+                          </strong>
+                          <div className="form-row">
+                            <div className="form-group">
+                              <label>Status</label>
+                              <select
+                                className="form-control"
+                                value={editingBooking.status}
+                                onChange={(e) => setEditingBooking({ ...editingBooking, status: e.target.value })}
+                              >
+                                <option value="Confirmed">Confirmed</option>
+                                <option value="Pending Payment">Pending Payment</option>
+                                <option value="Completed">Completed</option>
+                                <option value="Cancelled">Cancelled</option>
+                              </select>
+                            </div>
+                            <div className="form-group">
+                              <label>Departure Date</label>
+                              <input
+                                type="date"
+                                className="form-control"
+                                value={editingBooking.departure_date}
+                                onChange={(e) => setEditingBooking({ ...editingBooking, departure_date: e.target.value })}
+                              />
+                            </div>
+                          </div>
+                          <div className="form-row">
+                            <div className="form-group">
+                              <label>Guests</label>
+                              <input
+                                type="number"
+                                min="1"
+                                max="25"
+                                className="form-control"
+                                value={editingBooking.guests}
+                                onChange={(e) => setEditingBooking({ ...editingBooking, guests: e.target.value })}
+                              />
+                            </div>
+                            <div className="form-group">
+                              <label>Admin Notes</label>
+                              <input
+                                type="text"
+                                className="form-control"
+                                value={editingBooking.notes || ""}
+                                onChange={(e) => setEditingBooking({ ...editingBooking, notes: e.target.value })}
+                              />
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", gap: "8px" }}>
+                            <button type="submit" className="btn btn-primary btn-sm">Save Changes</button>
+                            <button type="button" className="btn btn-outline btn-sm" onClick={() => setEditingBooking(null)}>Cancel</button>
+                          </div>
+                        </form>
+                      )}
+
+                      {adminBookings.length === 0 ? (
+                        <p style={{ color: "var(--text-muted)" }}>No bookings recorded yet. Create one via the Booking page.</p>
+                      ) : (
+                        <div className="table-responsive">
+                          <table className="crud-table">
+                            <thead>
+                              <tr>
+                                <th>Code</th>
+                                <th>Explorer</th>
+                                <th>Expedition</th>
+                                <th>Date &amp; Guests</th>
+                                <th>Total</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {adminBookings.map((bk) => (
+                                <tr key={bk.id}>
+                                  <td><strong>{bk.booking_code}</strong></td>
+                                  <td>
+                                    {bk.full_name}
+                                    <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>{bk.email} · {bk.phone}</div>
+                                  </td>
+                                  <td>
+                                    {bk.destination_title}
+                                    <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>{bk.package_tier}</div>
+                                  </td>
+                                  <td>{bk.departure_date} ({bk.guests} pax)</td>
+                                  <td style={{ fontWeight: 700 }}>{formatIDR(bk.total_price)}</td>
+                                  <td>
+                                    <span className={`status-pill ${bk.status === "Cancelled" ? "cancelled" : bk.status === "Completed" ? "completed" : ""}`}>
+                                      {bk.status}
+                                    </span>
+                                  </td>
+                                  <td>
+                                    <div style={{ display: "flex", gap: "6px" }}>
+                                      <button
+                                        className="btn btn-outline btn-sm"
+                                        onClick={() => setEditingBooking(bk)}
+                                        title="Edit Booking"
+                                      >
+                                        <i className="fa-solid fa-pen"></i>
+                                      </button>
+                                      <button
+                                        className="btn btn-danger btn-sm"
+                                        onClick={() => handleDeleteBooking(bk)}
+                                        title="Delete Booking"
+                                      >
+                                        <i className="fa-solid fa-trash"></i>
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* TAB 3: CONTACT MESSAGES & SUBSCRIBERS (READ & DELETE) */}
+                  {adminTab === "inquiries" && (
+                    <div className="two-col-grid">
+                      <div className="glass-card form-card">
+                        <h3 style={{ marginBottom: "12px" }}>Contact Inquiries ({adminContacts.length})</h3>
+                        {adminContacts.length === 0 ? (
+                          <p style={{ color: "var(--text-muted)", fontSize: "0.9rem" }}>No contact messages yet.</p>
+                        ) : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                            {adminContacts.map((c) => (
+                              <div key={c.id} className="glass-card" style={{ padding: "14px" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                  <strong>{c.name} ({c.email})</strong>
+                                  <button className="btn btn-danger btn-sm" onClick={() => handleDeleteInquiry("contact", c.id)}>
+                                    <i className="fa-solid fa-trash"></i>
+                                  </button>
+                                </div>
+                                <div style={{ fontSize: "0.8rem", color: "var(--ocean-primary)", fontWeight: 700 }}>{c.subject}</div>
+                                <p style={{ fontSize: "0.86rem", marginTop: "4px", color: "var(--text-secondary)" }}>{c.message}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="glass-card form-card">
+                        <h3 style={{ marginBottom: "12px" }}>Newsletter Subscribers ({adminSubscribers.length})</h3>
+                        {adminSubscribers.length === 0 ? (
+                          <p style={{ color: "var(--text-muted)", fontSize: "0.9rem" }}>No subscribers yet.</p>
+                        ) : (
+                          <div className="table-responsive">
+                            <table className="crud-table">
+                              <thead>
+                                <tr>
+                                  <th>Email</th>
+                                  <th>Action</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {adminSubscribers.map((s) => (
+                                  <tr key={s.id}>
+                                    <td>{s.email}</td>
+                                    <td>
+                                      <button className="btn btn-danger btn-sm" onClick={() => handleDeleteInquiry("sub", s.id)}>
+                                        <i className="fa-solid fa-trash"></i>
+                                      </button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           </section>
         )}
@@ -1415,10 +2078,11 @@ function App() {
             </div>
 
             <div>
-              <h4>Explorer Support</h4>
+              <h4>Explorer &amp; Admin</h4>
               <ul className="footer-links">
                 <li><button onClick={() => navigateTo("booking")}>Reserve an Expedition</button></li>
                 <li><button onClick={() => navigateTo("auth")}>Track Booking Code</button></li>
+                <li><button onClick={() => navigateTo("admin")}>Admin CRUD Console</button></li>
                 <li><button onClick={() => navigateTo("contact")}>Malang Basecamp HQ</button></li>
               </ul>
             </div>
