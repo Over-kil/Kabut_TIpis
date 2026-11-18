@@ -1,0 +1,19 @@
+<nav class="navbar">
+  <div class="nav-brand">
+    <a href="/">Kabut Tipis Adventure</a>
+  </div>
+  <ul class="nav-links">
+    <li><a href="/">Beranda</a></li>
+    <li><a href="{{ url_for('booking') }}">Booking</a></li>
+
+    {% if session.get('user_id') %}
+      {% if session.get('role') == 'user' %}
+        <li><span>Kode Anda: <strong>{{ session.get('identity_code') }}</strong></span></li>
+      {% endif %}
+      <li><a href="{{ url_for('logout') }}">Logout ({{ session.get('full_name') }})</a></li>
+    {% else %}
+      <li><a href="{{ url_for('login') }}">Login</a></li>
+      <li><a href="{{ url_for('register') }}">Registrasi</a></li>
+    {% endif %}
+  </ul>
+</nav>

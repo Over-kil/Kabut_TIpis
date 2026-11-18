@@ -1,17 +1,267 @@
+from datetime import datetime, timezone
 import json
 import os
 import re
 import sqlite3
 import uuid
-from datetime import datetime
 from functools import wraps
-
 from flask import Flask, g, jsonify, render_template, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
+import secrets
+import string
+from datetime import datetime, timezone
+from functools import wraps
+from flask import Flask, render_template, request, redirect, url_for, session, flash
+from werkzeug.security import generate_password_hash, check_password_hash
+import sqlite3
 
+app = Flask(__name__)
+app.secret_key = "ganti_dengan_secret_key_acak_yang_kuat"
+DB_NAME = "database.db"  # Sesuaikan dengan nama file .db Anda
+
+# Akun Admin yang sudah ditentukan
+ADMIN_EMAIL = "admin@kabuttipis.com"
+ADMIN_PASSWORD = "AdminPassword123!"
+
+
+def get_db():
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def generate_identity_code(cursor):
+    """Membuat kode identitas unik format KTA-XXXXXX yang belum ada di DB."""
+    chars = string.ascii_uppercase + string.digits
+    while True:
+        code = "KTA-" + "".join(secrets.choice(chars) for _ in range(6))
+        existing = cursor.execute(
+            "SELECT id FROM users WHERE identity_code = ?", (code,)
+        ).fetchone()
+        if not existing:
+            return code
+
+
+def init_db():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # 1. Buat tabel users dengan kolom identity_code
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            full_name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            phone TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user',
+            identity_code TEXT UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    # 2. Buat tabel bookings (contoh struktur)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS bookings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            identity_code TEXT NOT NULL,
+            package_name TEXT NOT NULL,
+            booking_date TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    """)
+
+    # 3. Seed akun Admin default jika belum ada
+    admin_exists = cursor.execute(
+        "SELECT id FROM users WHERE email = ?", (ADMIN_EMAIL,)
+    ).fetchone()
+
+    if not admin_exists:
+        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        cursor.execute(
+            """
+            INSERT INTO users (full_name, email, phone, role, identity_code, password_hash, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Administrator",
+                ADMIN_EMAIL,
+                "081200000000",
+                "admin",
+                "ADMIN-MASTER",
+                generate_password_hash(ADMIN_PASSWORD),
+                now_utc,
+            ),
+        )
+
+    conn.commit()
+    conn.close()
+
+
+# --- DECORATOR PROTEKSI ROUTE ---
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "user_id" not in session:
+            flash("Silakan registrasi atau login terlebih dahulu sebelum melakukan booking.", "warning")
+            return redirect(url_for("register"))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if session.get("role") != "admin":
+            flash("Akses ditolak. Halaman ini khusus Admin.", "danger")
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+# --- ROUTE REGISTRASI (MENGHASILKAN KODE IDENTITAS UNIK) ---
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        full_name = request.form["full_name"].strip()
+        email = request.form["email"].strip().lower()
+        phone = request.form["phone"].strip()
+        password = request.form["password"]
+
+        conn = get_db()
+        cursor = conn.cursor()
+
+        # Cek email sudah terdaftar atau belum
+        if cursor.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone():
+            conn.close()
+            flash("Email sudah terdaftar. Silakan langsung login.", "warning")
+            return redirect(url_for("login"))
+
+        identity_code = generate_identity_code(cursor)
+        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        cursor.execute(
+            """
+            INSERT INTO users (full_name, email, phone, role, identity_code, password_hash, created_at)
+            VALUES (?, ?, ?, 'user', ?, ?, ?)
+            """,
+            (full_name, email, phone, identity_code, generate_password_hash(password), now_utc),
+        )
+        conn.commit()
+        user_id = cursor.lastrowid
+        conn.close()
+
+        # Otomatis login setelah registrasi & simpan kode identitas di session
+        session["user_id"] = user_id
+        session["full_name"] = full_name
+        session["role"] = "user"
+        session["identity_code"] = identity_code
+
+        flash(
+            f"Registrasi berhasil! Simpan Kode Identitas Anda: {identity_code} (wajib dimasukkan saat booking).",
+            "success",
+        )
+        return redirect(url_for("booking"))
+
+    return render_template("register.html")
+
+
+# --- ROUTE LOGIN (UNTUK USER & ADMIN) ---
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        email = request.form["email"].strip().lower()
+        password = request.form["password"]
+
+        conn = get_db()
+        user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+        conn.close()
+
+        if user and check_password_hash(user["password_hash"], password):
+            session["user_id"] = user["id"]
+            session["full_name"] = user["full_name"]
+            session["role"] = user["role"]
+            session["identity_code"] = user["identity_code"]
+
+            # Jika login memakai email & password admin, langsung arahkan ke dashboard CRUD admin
+            if user["role"] == "admin":
+                flash("Login Admin berhasil.", "success")
+                return redirect(url_for("admin_dashboard"))
+
+            flash(f"Selamat datang kembali, {user['full_name']}!", "success")
+            return redirect(url_for("booking"))
+
+        flash("Email atau password salah.", "danger")
+
+    return render_template("login.html")
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    flash("Anda telah keluar dari akun.", "info")
+    return redirect(url_for("login"))
+
+
+# --- ROUTE BOOKING (WAJIB LOGIN & WAJIB INPUT KODE IDENTITAS) ---
+@app.route("/booking", methods=["GET", "POST"])
+@login_required
+def booking():
+    if request.method == "POST":
+        input_code = request.form["identity_code"].strip().upper()
+        package_name = request.form["package_name"]
+        booking_date = request.form["booking_date"]
+
+        conn = get_db()
+        user = conn.execute(
+            "SELECT identity_code FROM users WHERE id = ?", (session["user_id"],)
+        ).fetchone()
+
+        # Validasi kecocokan kode identitas
+        if not user or input_code != user["identity_code"]:
+            conn.close()
+            flash("Kode Identitas tidak valid atau tidak sesuai dengan akun Anda!", "danger")
+            return redirect(url_for("booking"))
+
+        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        conn.execute(
+            """
+            INSERT INTO bookings (user_id, identity_code, package_name, booking_date, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (session["user_id"], input_code, package_name, booking_date, now_utc),
+        )
+        conn.commit()
+        conn.close()
+
+        flash("Booking berhasil dikonfirmasi!", "success")
+        return redirect(url_for("booking"))
+
+    return render_template("booking.html", identity_code=session.get("identity_code"))
+
+
+# --- ROUTE ADMIN CRUD (TETAP BISA DIAKSES SETELAH LOGIN ADMIN) ---
+@app.route("/admin")
+@admin_required
+def admin_dashboard():
+    conn = get_db()
+    bookings = conn.execute("""
+        SELECT bookings.*, users.full_name, users.email, users.phone
+        FROM bookings
+        JOIN users ON bookings.user_id = users.id
+        ORDER BY bookings.created_at DESC
+    """).fetchall()
+    conn.close()
+    return render_template("admin.html", bookings=bookings)
 app = Flask(__name__)
 app.secret_key = os.environ.get("KTA_SECRET_KEY", "kta-ocean-mist-secret-key-2026")
 DATABASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kta_database.db")
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 # ==============================================================================
@@ -47,6 +297,11 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
+
+    # Upgrade databases created before the role-based authentication feature.
+    user_columns = {row[1] for row in cursor.execute("PRAGMA table_info(users)").fetchall()}
+    if "role" not in user_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'explorer'")
 
     # Destinations Table
     cursor.execute("""
@@ -124,7 +379,7 @@ def init_db():
                 "+62 812 8899 4410",
                 "admin",
                 generate_password_hash("admin123"),
-                datetime.utcnow().isoformat() + "Z",
+                utc_now(),
             ),
         )
 
@@ -575,7 +830,7 @@ def api_create_booking():
 
     booking_code = f"KTA-{uuid.uuid4().hex[:6].upper()}"
     user_id = session.get("user_id")
-    created_at = datetime.utcnow().isoformat() + "Z"
+    created_at = utc_now()
 
     db.execute("""
         INSERT INTO bookings (
@@ -719,7 +974,7 @@ def api_contact():
     db = get_db()
     db.execute(
         "INSERT INTO contacts (name, email, subject, message, created_at) VALUES (?, ?, ?, ?, ?)",
-        (name, email, subject, message, datetime.utcnow().isoformat() + "Z")
+        (name, email, subject, message, utc_now())
     )
     db.commit()
 
@@ -747,7 +1002,7 @@ def api_newsletter():
 
     db.execute(
         "INSERT INTO subscribers (email, created_at) VALUES (?, ?)",
-        (email, datetime.utcnow().isoformat() + "Z")
+        (email, utc_now())
     )
     db.commit()
 
@@ -809,7 +1064,7 @@ def api_register():
     pw_hash = generate_password_hash(password)
     cursor = db.execute(
         "INSERT INTO users (full_name, email, phone, role, password_hash, created_at) VALUES (?, ?, ?, 'explorer', ?, ?)",
-        (full_name, email, phone, pw_hash, datetime.utcnow().isoformat() + "Z")
+        (full_name, email, phone, pw_hash, utc_now())
     )
     db.commit()
 

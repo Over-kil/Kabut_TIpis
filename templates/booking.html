@@ -1,0 +1,28 @@
+<h2>Form Booking</h2>
+
+<div class="alert alert-info">
+  Kode Identitas Anda: <strong>{{ identity_code }}</strong><br>
+  <small>Masukkan kode di atas pada kolom verifikasi di bawah untuk menyelesaikan booking.</small>
+</div>
+
+<form method="POST" action="{{ url_for('booking') }}">
+  <div>
+    <label for="identity_code">Masukkan Kode Identitas *</label>
+    <input type="text" id="identity_code" name="identity_code" placeholder="Contoh: KTA-A1B2C3" required>
+  </div>
+
+  <div>
+    <label for="package_name">Pilih Paket Petualangan *</label>
+    <select id="package_name" name="package_name" required>
+      <option value="Paket Camping Ceria">Paket Camping Ceria</option>
+      <option value="Paket Trekking Puncak">Paket Trekking Puncak</option>
+    </select>
+  </div>
+
+  <div>
+    <label for="booking_date">Tanggal Booking *</label>
+    <input type="date" id="booking_date" name="booking_date" required>
+  </div>
+
+  <button type="submit">Konfirmasi Booking</button>
+</form>
